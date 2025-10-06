@@ -225,7 +225,7 @@ function toggleDarkMode() {
     localStorage.setItem("darkMode", document.body.classList.contains("dark-mode"));
 }
 
-let selectedFile = null, fileCount = 0;
+let selectedFile = null, fileCount = fetchFiles();
 const uploadArea = document.getElementById("upload-area");
 uploadArea.addEventListener("dragover", e=>{ e.preventDefault(); uploadArea.classList.add("dragover"); });
 uploadArea.addEventListener("dragleave", ()=>{ uploadArea.classList.remove("dragover"); });
@@ -277,7 +277,7 @@ async function upload(event){
     try{
         const res=await fetch("/upload",{ method:"POST", headers:{"Authorization":"Bearer "+token}, body:formData });
         const data=await res.json();
-        if(res.ok){ showUploadResult(`File uploaded successfully: ${data.filename}`,"success"); fileCount++; document.getElementById("file-count").textContent=fileCount; resetUploadArea(); }
+        if(res.ok){ showUploadResult(`File uploaded successfully: ${data.filename}`,"success"); fileCount = fetchFiles(); document.getElementById("file-count").textContent=fileCount; resetUploadArea(); }
         else showUploadResult(data.error || "Upload failed","error");
     } catch(e){ showUploadResult("Error uploading file","error"); }
     finally{ uploadBtn.disabled=false; uploadBtnText.innerHTML='<i class="fas fa-upload"></i> Upload File'; }
@@ -305,6 +305,20 @@ function showNotification(message,type){
     document.body.appendChild(notification);
     setTimeout(()=>{ notification.style.animation="slideOutRight 0.3s ease"; setTimeout(()=>notification.remove(),300); },3000);
 }
+
+async function fetchFiles() {
+    try {
+        const res = await fetch("/files", {
+            headers: { "Authorization": "Bearer " + token }
+        });
+        const files = await res.json();
+        document.getElementById("file-count").textContent = files.length;
+        renderFileList(files);
+    } catch (err) {
+        console.error(err);
+    }
+}
+
 
 function logout(){ localStorage.removeItem("token"); window.location.href="/"; }
 fetchUsers();
