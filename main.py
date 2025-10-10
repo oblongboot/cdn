@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, render_template, send_from_directory
+from flask import Flask, Response, jsonify, request, render_template, send_from_directory
 from sqlite3 import connect, Error
 from bcrypt import hashpw, gensalt, checkpw
 import jwt
@@ -6,6 +6,10 @@ import datetime
 import os
 import uuid
 from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
+import mimetypes
+
+load_dotenv()
 
 app = Flask(__name__)
 app.config.update(
@@ -18,6 +22,11 @@ UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 WEBHOOK = os.getenv("DCWEBHOOK")
 SECRET_KEY = os.urandom(24)
+site = os.getenv("SITE", "https://cdn.zephyrdevelopment.co.uk")
+OG_COLOR = os.getenv("OG_COLOR", "#E27712")
+OG_SITE_NAME = os.getenv("OG_SITE_NAME", "CDN")
+OG_TITLE = os.getenv("OG_TITLE", ":cat2:")
+OG_DESC = os.getenv("OG_DESC")
 
 def get_db_connection():
     try:
@@ -40,7 +49,7 @@ def initialize_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
+
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS files (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +66,7 @@ def initialize_db():
                 (os.getenv("DEFAULT_USERNAME"), os.getenv("DEFAULT_PASSWORD")),
                 (os.getenv("USER_TWO_NAME"), os.getenv("USER_TWO_PASSWORD"))
             ]
-            
+
             for username, password in default_users:
                 if username and password:
                     cur = conn.execute("SELECT * FROM login WHERE username = ?", (username,))
@@ -126,10 +135,10 @@ def upload_file():
     ext = os.path.splitext(original_name)[1]
     filename = f"{uuid.uuid4().hex}{ext}"
     filepath = os.path.join(UPLOAD_FOLDER, filename)
-    
+
     file.save(filepath)
     file_size = os.path.getsize(filepath)
-    
+
     conn = get_db_connection()
     if conn:
         with conn:
@@ -138,12 +147,70 @@ def upload_file():
                 (filename, original_name, request.user, file_size, file.content_type)
             )
         conn.close()
-    
+
     log(f"File uploaded: {original_name} by {request.user}")
     return jsonify(message="File uploaded successfully", filename=filename, url=f"/cdn/{filename}")
 
-@app.route("/cdn/<filename>", methods=["GET"])
+@app.route("/cdn/<path:filename>", methods=["GET"])
 def serve_file(filename):
+    if request.args.get("noEmbed") == "true":
+        return send_from_directory(UPLOAD_FOLDER, filename)
+    
+    user_agent = request.headers.get("User-Agent", "").lower()
+    is_bot = any(bot in user_agent for bot in [
+        "discordbot", "whatsapp", "twitterbot",
+        "facebookexternalhit", "slackbot"
+    ])
+
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    if not os.path.exists(file_path):
+        return Response("File not found", status=404)
+
+    if is_bot:
+        mime_type, _ = mimetypes.guess_type(file_path)
+        file_url = f"https://{site}/cdn/{filename}?noEmbed=true"
+
+        meta_tags = ""
+        if mime_type and mime_type.startswith("video"):
+            meta_tags = f"""
+                <meta property="og:type" content="video.other" />
+                <meta property="og:video" content="{file_url}" />
+                <meta property="og:video:url" content="{file_url}" />
+                <meta property="og:video:secure_url" content="{file_url}" />
+                <meta property="og:video:type" content="{mime_type}" />
+                <meta name="twitter:card" content="player" />
+                <meta name="twitter:player" content="{file_url}" />
+            """
+        elif mime_type and mime_type.startswith("image"):
+            meta_tags = f"""
+                <meta property="og:type" content="image" />
+                <meta property="og:image" content="{file_url}" />
+                <meta property="og:image:secure_url" content="{file_url}" />
+                <meta property="og:url" content="{file_url}" />
+                <meta name="twitter:card" content="summary_large_image" />
+            """
+            if "whatsapp" in user_agent:
+                meta_tags += f"""
+                    <meta property="og:image:width" content="512" />
+                    <meta property="og:image:height" content="512" />
+                    <meta property="og:image:type" content="{mime_type}" />
+                """
+
+        html = f"""<!DOCTYPE html>
+<html lang="en" prefix="og: http://ogp.me/ns#">
+<head>
+    <meta charset="utf-8" />
+    <meta name="theme-color" content="{OG_COLOR}" />
+    <meta property="og:site_name" content="{OG_SITE_NAME}" />
+    <meta property="og:title" content="{OG_TITLE}" />
+    <meta property="og:description" content="{OG_DESC}" />
+    {meta_tags}
+</head>
+<body style="margin:0;background:#111;display:flex;justify-content:center;align-items:center;height:100vh;">
+</body>
+</html>"""
+        return Response(html, mimetype="text/html")
+    
     return send_from_directory(UPLOAD_FOLDER, filename)
 
 @app.route("/files", methods=["GET"])
@@ -164,22 +231,22 @@ def delete_file(file_id):
     conn = get_db_connection()
     if not conn:
         return jsonify(error="Database connection failed"), 500
-    
+
     with conn:
         cur = conn.execute("SELECT filename FROM files WHERE id = ?", (file_id,))
         file_record = cur.fetchone()
-        
+
         if not file_record:
             conn.close()
             return jsonify(error="File not found"), 404
-        
+
         filepath = os.path.join(UPLOAD_FOLDER, file_record['filename'])
         if os.path.exists(filepath):
             os.remove(filepath)
-        
+
         conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
     conn.close()
-    
+
     log(f"File deleted: {file_record['filename']} by {request.user}")
     return jsonify(message="File deleted successfully")
 
@@ -235,7 +302,7 @@ def auth_login():
         SECRET_KEY,
         algorithm="HS256"
     )
-    
+
     log(f"User logged in: {username}")
     return jsonify(message="Authenticated successfully", token=token)
 
@@ -256,7 +323,7 @@ def get_logins():
 def delete_login(username):
     if username == request.user:
         return jsonify(error="Cannot delete your own account"), 400
-    
+
     conn = get_db_connection()
     if not conn:
         return jsonify(error="Database connection failed"), 500
@@ -264,10 +331,10 @@ def delete_login(username):
         cur = conn.execute("DELETE FROM login WHERE username = ?", (username,))
         deleted = cur.rowcount
     conn.close()
-    
+
     if deleted == 0:
         return jsonify(error="User not found"), 404
-    
+
     log(f"User deleted: {username} by {request.user}")
     return jsonify(message=f"Deleted user '{username}' successfully")
 
@@ -298,4 +365,4 @@ def internal_error(e):
 if __name__ == "__main__":
     log(f"Starting server with secret key: ```{SECRET_KEY}```")
     initialize_db()
-    app.run()
+    app.run(port=3131)
