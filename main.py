@@ -4,6 +4,8 @@ from bcrypt import hashpw, gensalt, checkpw
 import jwt
 import datetime
 import os
+import requests
+import time
 import uuid
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
@@ -18,6 +20,7 @@ app.config.update(
     JSON_SORT_KEYS=False,
     JSON_AS_ASCII=False
 )
+
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 WEBHOOK = os.getenv("DCWEBHOOK")
@@ -27,6 +30,11 @@ OG_COLOR = os.getenv("OG_COLOR", "#E27712")
 OG_SITE_NAME = os.getenv("OG_SITE_NAME", "CDN")
 OG_TITLE = os.getenv("OG_TITLE", ":cat2:")
 OG_DESC = os.getenv("OG_DESC")
+#todo: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+
+def isDevEnv():
+    return os.name != "nt" # if windows ur in dev env, aint nobody running a windows server ✌️✌️ (maybe idfk)
+
 
 def get_db_connection():
     try:
@@ -103,15 +111,119 @@ def token_required(f):
     wrapper.__name__ = f.__name__
     return wrapper
 
-def log(message):
-    if WEBHOOK:
-        import requests
-        payload = {"content": message}
-        try:
-            requests.post(WEBHOOK, json=payload)
-        except Exception as e:
-            print(f"Failed to send log to webhook: {e}")
-    print(message)
+def log(message, title="CDN", color=None):
+    """
+    Send a formatted embed to Discord webhook
+    
+    Args:
+        message: The main message content
+        title: Title of the embed (default: "CDN Activity")
+        color: Hex color code (default: uses OG_COLOR from env)
+    """
+    if not WEBHOOK:
+        return
+    
+    hex_color = color or OG_COLOR
+    color_int = int(hex_color.lstrip('#'), 16)
+    
+    embed = {
+        "embeds": [{
+            "title": title,
+            "description": message,
+            "color": color_int,
+            "footer": {
+                "text": OG_SITE_NAME
+            },
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }]
+    }
+    
+    try:
+        requests.post(WEBHOOK, json=embed)
+    except Exception as e:
+        print(f"Failed to send log to webhook: {e}")
+
+
+def coolerlog(message, title="CDN", color=None, fields=None, thumbnail=None):
+    """
+    Send a detailed formatted embed to Discord webhook
+    
+    Args:
+        message: The main message content
+        title: Title of the embed
+        color: Hex color code (default: uses OG_COLOR var)
+        fields: List of dicts with 'name', 'value', and optional 'inline' keys
+        thumbnail: URL for thumbnail image
+    """
+    if not WEBHOOK:
+        return
+    
+    hex_color = color or OG_COLOR
+    color_int = int(hex_color.lstrip('#'), 16)
+    
+    embed_data = {
+        "title": title,
+        "description": message,
+        "color": color_int,
+        "footer": {
+            "text": OG_SITE_NAME
+        },
+        "timestamp": datetime.datetime.utcnow().isoformat()
+    }
+    
+    if fields:
+        embed_data["fields"] = fields
+    
+    if thumbnail:
+        embed_data["thumbnail"] = {"url": thumbnail}
+    
+    payload = {"embeds": [embed_data]}
+    
+    try:
+        requests.post(WEBHOOK, json=payload)
+    except Exception as e:
+        print(f"Failed to send log to webhook: {e}")
+
+def log_file_upload(filename, original_name, uploader, file_size, mime_type):
+    """
+    Log file upload with image preview for image files
+    """
+    time.sleep(3)
+    if not WEBHOOK:
+        return
+    
+    hex_color = OG_COLOR
+    color_int = int(hex_color.lstrip('#'), 16)
+    
+    file_url = f"{site}/cdn/{filename}?noEmbed=true"
+    
+    embed_data = {
+        "title": "File Upload",
+        "description": f"**{original_name}** uploaded successfully",
+        "color": color_int,
+        "fields": [
+            {"name": "Uploader", "value": uploader, "inline": True},
+            {"name": "Size", "value": f"{file_size / 1024:.2f} KB", "inline": True},
+            {"name": "Type", "value": mime_type or "Unknown", "inline": True}
+        ],
+        "footer": {
+            "text": OG_SITE_NAME
+        },
+        "timestamp": datetime.datetime.utcnow().isoformat()
+    }
+    
+    if mime_type and mime_type.startswith("image"):
+        embed_data["image"] = {"url": file_url}
+    
+    elif mime_type and mime_type.startswith("video"):
+        embed_data["description"] += f"\n[View Video]({file_url})"
+    
+    payload = {"embeds": [embed_data]}
+    
+    try:
+        requests.post(WEBHOOK, json=payload)
+    except Exception as e:
+        print(f"Failed to send log to webhook: {e}")
 
 @app.route("/", methods=["GET"])
 def base():
@@ -148,7 +260,7 @@ def upload_file():
             )
         conn.close()
 
-    log(f"File uploaded: {original_name} by {request.user}")
+    log_file_upload(filename, original_name, request.user, file_size, file.content_type)
     return jsonify(message="File uploaded successfully", filename=filename, url=f"/cdn/{filename}")
 
 @app.route("/cdn/<path:filename>", methods=["GET"])
@@ -213,6 +325,24 @@ def serve_file(filename):
     
     return send_from_directory(UPLOAD_FOLDER, filename)
 
+@app.route("/cdn/delete/<path:filename>", methods=["DELETE"])
+@token_required
+def delete_file(filename):
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    if not os.path.exists(file_path):
+        return jsonify({"error": "File not found"}), 404
+        
+    try:
+        os.remove(file_path)
+        conn = get_db_connection()
+        if conn:
+            with conn:
+                conn.execute("DELETE FROM files WHERE filename = ?", (filename,))
+            conn.close()
+        return jsonify({"success": True, "message": f"{filename} deleted"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/files", methods=["GET"])
 @token_required
 def get_files():
@@ -225,30 +355,6 @@ def get_files():
     conn.close()
     return jsonify(files)
 
-@app.route("/files/<int:file_id>", methods=["DELETE"])
-@token_required
-def delete_file(file_id):
-    conn = get_db_connection()
-    if not conn:
-        return jsonify(error="Database connection failed"), 500
-
-    with conn:
-        cur = conn.execute("SELECT filename FROM files WHERE id = ?", (file_id,))
-        file_record = cur.fetchone()
-
-        if not file_record:
-            conn.close()
-            return jsonify(error="File not found"), 404
-
-        filepath = os.path.join(UPLOAD_FOLDER, file_record['filename'])
-        if os.path.exists(filepath):
-            os.remove(filepath)
-
-        conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
-    conn.close()
-
-    log(f"File deleted: {file_record['filename']} by {request.user}")
-    return jsonify(message="File deleted successfully")
 
 @app.route("/login", methods=["POST"])
 @token_required
@@ -363,6 +469,8 @@ def internal_error(e):
     return jsonify(error="Internal Server Error", status=500, message=str(e)), 500
 
 if __name__ == "__main__":
+    print("start1 (hi twin)")
     log(f"Starting server with secret key: ```{SECRET_KEY}```")
     initialize_db()
+    print("start2 (bye twin)")
     app.run(port=3131)
