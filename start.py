@@ -6,6 +6,8 @@ import re
 import subprocess
 import sys
 from datetime import datetime
+import time
+
 
 class CDNLoader:
     def __init__(self, repo_owner="oblongboot", repo_name="cdn", install_dir="cdn"):
@@ -16,13 +18,12 @@ class CDNLoader:
         self.current_path = os.getcwd()
 
     def get_newest_cdn(self):
-        """Find the newest CDN version in current directory."""
         if not os.path.exists(self.current_path):
             return None
-        
+
         files = os.listdir(self.current_path)
         cdn_pattern = re.compile(r'^cdn-(\d+\.\d+\.\d+)$')
-        
+
         cdn_dirs = []
         for file in files:
             match = cdn_pattern.match(file)
@@ -34,10 +35,10 @@ class CDNLoader:
                     'version': version,
                     'version_num': version_num
                 })
-        
+
         if not cdn_dirs:
             return None
-        
+
         cdn_dirs.sort(key=lambda x: x['version_num'], reverse=True)
         newest = cdn_dirs[0]
 
@@ -47,15 +48,14 @@ class CDNLoader:
                 print(f"Cleaned up old version: {old_cdn['version']}")
             except Exception as e:
                 print(f"Warning: Could not remove {old_cdn['path']}: {e}")
-        
+
         return newest
 
     def backup_persistent_files(self, cdn_path):
-        """Backup .env, database.db, and uploads folder from existing CDN installation."""
         backup_content = {}
         backup_dir = os.path.join(self.current_path, "cdn_backup_temp")
         os.makedirs(backup_dir, exist_ok=True)
-        
+
         env_file = os.path.join(cdn_path, '.env')
         if os.path.exists(env_file):
             try:
@@ -75,29 +75,27 @@ class CDNLoader:
         uploads_dir = os.path.join(cdn_path, 'uploads')
         if os.path.exists(uploads_dir):
             shutil.copytree(uploads_dir, os.path.join(backup_dir, 'uploads'), dirs_exist_ok=True)
-        
+
         return backup_content, backup_dir
 
     def restore_persistent_files(self, cdn_path, env_backup, backup_dir):
-        """Restore .env, database.db, and uploads folder to new CDN installation."""
         if env_backup:
             self.restore_env_file(cdn_path, env_backup)
-        
+
         db_backup = os.path.join(backup_dir, 'database.db')
         if os.path.exists(db_backup):
             shutil.copy2(db_backup, os.path.join(cdn_path, 'database.db'))
-        
+
         uploads_backup = os.path.join(backup_dir, 'uploads')
         if os.path.exists(uploads_backup):
             shutil.copytree(uploads_backup, os.path.join(cdn_path, 'uploads'), dirs_exist_ok=True)
-        
+
         shutil.rmtree(backup_dir, ignore_errors=True)
 
     def restore_env_file(self, cdn_path, backup_content):
-        """Restore .env file to new CDN installation."""
         if not backup_content:
             return
-        
+
         env_file = os.path.join(cdn_path, '.env')
         existing_content = {}
         if os.path.exists(env_file):
@@ -110,19 +108,18 @@ class CDNLoader:
                             existing_content[key.strip()] = value.strip()
             except Exception:
                 pass
-        
+
         merged_content = {**existing_content, **backup_content}
         try:
             with open(env_file, 'w') as f:
                 f.write(f"# Last updated: {datetime.now().isoformat()}\n\n")
-                f.write("# should have been migrated from prev version, if not, please re-add manually, this applies to database.db and uploads folder too! thank you!\n")
+                f.write("# should have been migrated from prev version\n")
                 for key, value in merged_content.items():
                     f.write(f"{key}={value}\n")
         except Exception as e:
             print(f"Error restoring .env file: {e}")
 
     def get_latest_release(self):
-        """Fetch the latest release information from GitHub."""
         try:
             response = requests.get(self.api_url)
             response.raise_for_status()
@@ -132,29 +129,25 @@ class CDNLoader:
             return None
 
     def download_progress(self, url, output_path):
-        """Download file with progress bar."""
         try:
             response = requests.get(url, stream=True)
             response.raise_for_status()
-            
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
-            
-            print(f"Downloading CDN update! (This may take a second)")
-            
+            print("Downloading CDN update...")
+
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        
                         if total_size > 0:
                             progress = (downloaded / total_size) * 100
-                            bar_length = 50
+                            bar_length = 40
                             filled = int(bar_length * downloaded / total_size)
                             bar = '█' * filled + '-' * (bar_length - filled)
-                            print(f'\rDownloading |{bar}| {progress:.1f}% | {downloaded}/{total_size} bytes', end='')
-            
+                            print(f'\r[{bar}] {progress:.1f}% ({downloaded}/{total_size} bytes)', end='')
+
             print()
             return True
         except Exception as e:
@@ -162,21 +155,20 @@ class CDNLoader:
             return False
 
     def download_and_extract(self, release, version):
-        """Download and extract the CDN release."""
         zip_asset = None
         for asset in release['assets']:
             if asset['name'].endswith('.zip'):
                 zip_asset = asset
                 break
-        
+
         if not zip_asset:
             print("No zip file found in release")
             return None
-        
+
         temp_zip = os.path.join(self.current_path, f"cdn-{version}-temp.zip")
         if not self.download_progress(zip_asset['browser_download_url'], temp_zip):
             return None
-        
+
         extract_dir = os.path.join(self.current_path, f"cdn-{version}")
         try:
             with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
@@ -190,9 +182,7 @@ class CDNLoader:
             return None
 
     def launch_cdn(self, cdn_path):
-        """Launch the CDN application."""
-        possible_entries = ['main.py']
-        for entry in possible_entries:
+        for entry in ['main.py']:
             entry_path = os.path.join(cdn_path, entry)
             if os.path.exists(entry_path):
                 print(f"\nLaunching CDN from {entry_path}...")
@@ -206,15 +196,13 @@ class CDNLoader:
                 except Exception as e:
                     print(f"Error launching CDN: {e}")
                     return None
-        
+
         print(f"Warning: No entry point found in {cdn_path}")
-        print(f"Tried: {', '.join(possible_entries)}")
         return None
 
     def run(self):
-        """Main auto-update and launch routine."""
         print("Checking for CDN updates...")
-        
+
         latest_release = self.get_latest_release()
         newest = self.get_newest_cdn()
 
@@ -222,21 +210,21 @@ class CDNLoader:
         backup_dir = None
         if newest:
             env_backup, backup_dir = self.backup_persistent_files(newest['path'])
-        
+
         if not latest_release:
-            print("Failed to check for auto update.")
+            print("Failed to check for updates.")
             if newest:
-                print(f"Launching existing version {newest['version']}...")
                 self.launch_cdn(newest['path'])
-            else:
-                print("No CDN installation found!")
-            return    
+            return
+
         latest_version = latest_release['tag_name']
         latest_version_num = int(latest_version.replace('.', ''))
+
         if newest and newest['version_num'] == latest_version_num:
             print(f"CDN up to date! Launching version {newest['version']}...")
             self.launch_cdn(newest['path'])
             return
+
         print(f"New CDN version available: {latest_version}")
         new_cdn_path = self.download_and_extract(latest_release, latest_version)
         if not new_cdn_path:
@@ -244,19 +232,31 @@ class CDNLoader:
             if newest:
                 self.launch_cdn(newest['path'])
             return
+
         if newest:
             self.restore_persistent_files(new_cdn_path, env_backup, backup_dir)
-        if newest:
             try:
                 shutil.rmtree(newest['path'])
                 print(f"Removed old version: {newest['version']}")
             except Exception as e:
                 print(f"Warning: Could not remove old version: {e}")
-        
+
         print(f"CDN updated to {latest_version}!")
         self.launch_cdn(new_cdn_path)
 
 
+def main():
+    l = CDNLoader()
+    interval = 3 * 60 * 60 
+    last_check = 0
+
+    while True:
+        now = time.time()
+        if now - last_check >= interval:
+            l.run()
+            last_check = now
+        time.sleep(10)
+
+
 if __name__ == "__main__":
-    loader = CDNLoader()
-    loader.run()
+    main()
