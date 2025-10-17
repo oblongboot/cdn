@@ -7,6 +7,7 @@ import subprocess
 import sys
 from datetime import datetime
 import time
+import signal
 
 
 class CDNLoader:
@@ -16,6 +17,7 @@ class CDNLoader:
         self.api_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"
         self.install_dir = install_dir
         self.current_path = os.getcwd()
+        self.process = None
 
     def get_newest_cdn(self):
         if not os.path.exists(self.current_path):
@@ -181,18 +183,35 @@ class CDNLoader:
                 os.remove(temp_zip)
             return None
 
+    def stop_cdn(self):
+        """Stop the currently running CDN process"""
+        if self.process and self.process.poll() is None:
+            print("Stopping current CDN instance...")
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=10)
+                print("CDN stopped successfully")
+            except subprocess.TimeoutExpired:
+                print("CDN didn't stop gracefully, forcing...")
+                self.process.kill()
+                self.process.wait()
+            except Exception as e:
+                print(f"Error stopping CDN: {e}")
+            finally:
+                self.process = None
+
     def launch_cdn(self, cdn_path):
         for entry in ['main.py']:
             entry_path = os.path.join(cdn_path, entry)
             if os.path.exists(entry_path):
                 print(f"\nLaunching CDN from {entry_path}...")
                 try:
-                    process = subprocess.Popen(
+                    self.process = subprocess.Popen(
                         [sys.executable, entry_path],
                         cwd=cdn_path
                     )
-                    print(f"CDN launched successfully (PID: {process.pid})")
-                    return process
+                    print(f"CDN launched successfully (PID: {self.process.pid})")
+                    return self.process
                 except Exception as e:
                     print(f"Error launching CDN: {e}")
                     return None
@@ -200,9 +219,9 @@ class CDNLoader:
         print(f"Warning: No entry point found in {cdn_path}")
         return None
 
-    def run(self):
+    def check_and_update(self):
+        """Check for updates and update if needed"""
         print("Checking for CDN updates...")
-
         latest_release = self.get_latest_release()
         newest = self.get_newest_cdn()
 
@@ -213,7 +232,7 @@ class CDNLoader:
 
         if not latest_release:
             print("Failed to check for updates.")
-            if newest:
+            if newest and not self.process:
                 self.launch_cdn(newest['path'])
             return
 
@@ -221,11 +240,16 @@ class CDNLoader:
         latest_version_num = int(latest_version.replace('.', ''))
 
         if newest and newest['version_num'] == latest_version_num:
-            print(f"CDN up to date! Launching version {newest['version']}...")
-            self.launch_cdn(newest['path'])
+            print(f"CDN up to date (version {newest['version']})")
+            if not self.process or self.process.poll() is not None:
+                print("CDN not running, launching...")
+                self.launch_cdn(newest['path'])
             return
 
         print(f"New CDN version available: {latest_version}")
+        
+        self.stop_cdn()
+        
         new_cdn_path = self.download_and_extract(latest_release, latest_version)
         if not new_cdn_path:
             print("Download failed. Launching existing version if available...")
@@ -244,18 +268,33 @@ class CDNLoader:
         print(f"CDN updated to {latest_version}!")
         self.launch_cdn(new_cdn_path)
 
+    def run_with_updates(self, check_interval=3*60*60):
+        """Run CDN with periodic update checks"""
+        last_check = 0
+        self.check_and_update()
+        
+        try:
+            while True:
+                now = time.time()
+                if now - last_check >= check_interval:
+                    self.check_and_update()
+                    last_check = now
+                
+                if self.process and self.process.poll() is not None:
+                    print("CDN process died unexpectedly, restarting...")
+                    newest = self.get_newest_cdn()
+                    if newest:
+                        self.launch_cdn(newest['path'])
+                
+                time.sleep(10)
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+            self.stop_cdn()
+
 
 def main():
-    l = CDNLoader()
-    interval = 3 * 60 * 60 
-    last_check = 0
-
-    while True:
-        now = time.time()
-        if now - last_check >= interval:
-            l.run()
-            last_check = now
-        time.sleep(10)
+    loader = CDNLoader()
+    loader.run_with_updates(check_interval=3*60*60)
 
 
 if __name__ == "__main__":
