@@ -30,11 +30,6 @@ OG_COLOR = os.getenv("OG_COLOR", "#E27712")
 OG_SITE_NAME = os.getenv("OG_SITE_NAME", "CDN")
 OG_TITLE = os.getenv("OG_TITLE", ":cat2:")
 OG_DESC = os.getenv("OG_DESC")
-#todo: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-
-def isDevEnv():
-    return os.name != "nt" # if windows ur in dev env, aint nobody running a windows server ✌️✌️ (maybe idfk)
-
 
 def get_db_connection():
     try:
@@ -66,9 +61,15 @@ def initialize_db():
                     uploader TEXT NOT NULL,
                     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     file_size INTEGER,
-                    mime_type TEXT
+                    mime_type TEXT,
+                    one_time_view INTEGER DEFAULT 0
                 )
             ''')
+            try:
+                conn.execute("SELECT one_time_view FROM files LIMIT 1")
+            except:
+                conn.execute("ALTER TABLE files ADD COLUMN one_time_view INTEGER DEFAULT 0")
+                print("Added one_time_view column to files table")
 
             default_users = [
                 (os.getenv("DEFAULT_USERNAME"), os.getenv("DEFAULT_PASSWORD")),
@@ -184,7 +185,7 @@ def coolerlog(message, title="CDN", color=None, fields=None, thumbnail=None):
     except Exception as e:
         print(f"Failed to send log to webhook: {e}")
 
-def log_file_upload(filename, original_name, uploader, file_size, mime_type):
+def log_file_upload(filename, original_name, uploader, file_size, mime_type, one_time_view=False):
     """
     Log file upload with image preview for image files
     """
@@ -198,7 +199,7 @@ def log_file_upload(filename, original_name, uploader, file_size, mime_type):
     file_url = f"{site}/cdn/{filename}?noEmbed=true"
     
     embed_data = {
-        "title": "File Upload",
+        "title": "File Upload" + ("(One-Time View)" if one_time_view else ""),
         "description": f"**{original_name}** uploaded successfully",
         "color": color_int,
         "fields": [
@@ -211,6 +212,9 @@ def log_file_upload(filename, original_name, uploader, file_size, mime_type):
         },
         "timestamp": datetime.datetime.utcnow().isoformat()
     }
+    
+    if one_time_view:
+        embed_data["fields"].append({"name": "Note", "value": "This file will be deleted after first view", "inline": False})
     
     if mime_type and mime_type.startswith("image"):
         embed_data["image"] = {"url": file_url}
@@ -243,6 +247,8 @@ def upload_file():
     if file.filename == "":
         return jsonify(error="No selected file"), 400
 
+    one_time_view = 1 if request.form.get('one_time_view') == 'true' else 0
+
     original_name = secure_filename(file.filename)
     ext = os.path.splitext(original_name)[1]
     filename = f"{uuid.uuid4().hex}{ext}"
@@ -255,33 +261,45 @@ def upload_file():
     if conn:
         with conn:
             conn.execute(
-                "INSERT INTO files (filename, original_name, uploader, file_size, mime_type) VALUES (?, ?, ?, ?, ?)",
-                (filename, original_name, request.user, file_size, file.content_type)
+                "INSERT INTO files (filename, original_name, uploader, file_size, mime_type, one_time_view) VALUES (?, ?, ?, ?, ?, ?)",
+                (filename, original_name, request.user, file_size, file.content_type, one_time_view)
             )
         conn.close()
 
-    log_file_upload(filename, original_name, request.user, file_size, file.content_type)
-    return jsonify(message="File uploaded successfully", filename=filename, url=f"/cdn/{filename}")
+    log_file_upload(filename, original_name, request.user, file_size, file.content_type, bool(one_time_view))
+    return jsonify(
+        message="File uploaded successfully", 
+        filename=filename, 
+        url=f"/cdn/{filename}",
+        one_time_view=bool(one_time_view)
+    )
 
 @app.route("/cdn/<path:filename>", methods=["GET"])
 def serve_file(filename):
-    if request.args.get("noEmbed") == "true":
-        return send_from_directory(UPLOAD_FOLDER, filename)
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    if not os.path.exists(file_path):
+        return Response("File not found", status=404)
+    
+    conn = get_db_connection()
+    file_info = None
+    if conn:
+        with conn:
+            cur = conn.execute("SELECT * FROM files WHERE filename = ?", (filename,))
+            file_info = cur.fetchone()
+        conn.close()
     
     user_agent = request.headers.get("User-Agent", "").lower()
     is_bot = any(bot in user_agent for bot in [
         "discordbot", "whatsapp", "twitterbot",
-        "facebookexternalhit", "slackbot"
+        "facebookexternalhit", "slackbot", "bot", "crawler", "spider"
     ])
-
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-    if not os.path.exists(file_path):
-        return Response("File not found", status=404)
-
+    
+    is_one_time = file_info and file_info.get('one_time_view') == 1
+    
     if is_bot:
         mime_type, _ = mimetypes.guess_type(file_path)
-        file_url = f"https://{site}/cdn/{filename}?noEmbed=true"
-
+        file_url = f"{site}/cdn/{filename}?noEmbed=true"
+        
         meta_tags = ""
         if mime_type and mime_type.startswith("video"):
             meta_tags = f"""
@@ -307,7 +325,7 @@ def serve_file(filename):
                     <meta property="og:image:height" content="512" />
                     <meta property="og:image:type" content="{mime_type}" />
                 """
-
+        
         html = f"""<!DOCTYPE html>
 <html lang="en" prefix="og: http://ogp.me/ns#">
 <head>
@@ -322,6 +340,34 @@ def serve_file(filename):
 </body>
 </html>"""
         return Response(html, mimetype="text/html")
+
+    if is_one_time:
+        try:
+            conn = get_db_connection()
+            if conn:
+                with conn:
+                    conn.execute("DELETE FROM files WHERE filename = ?", (filename,))
+                conn.close()
+            
+            response = send_from_directory(UPLOAD_FOLDER, filename)
+            
+            @response.call_on_close
+            def delete_one_time_file():
+                import threading
+                def delayed_delete():
+                    time.sleep(2)
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                        log(f"One-time view file deleted: {filename} (original: {file_info.get('original_name', 'unknown')})")
+                    except Exception as e:
+                        print(f"Error deleting one-time file: {e}")
+                
+                threading.Thread(target=delayed_delete, daemon=True).start()
+            
+            return response
+        except Exception as e:
+            return Response(f"Error serving file: {e}", status=500)
     
     return send_from_directory(UPLOAD_FOLDER, filename)
 
