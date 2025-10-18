@@ -37,7 +37,7 @@ def get_db_connection():
         conn.row_factory = lambda cursor, row: {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
         return conn
     except Error as e:
-        print(f"Database connection error: {e}")
+        log(f"Database connection error: {e}")
         return None
 
 def initialize_db():
@@ -280,6 +280,8 @@ def serve_file(filename):
     if not os.path.exists(file_path):
         return Response("File not found", status=404)
     
+    no_embed = request.args.get('noEmbed') == 'true'
+    
     conn = get_db_connection()
     file_info = None
     if conn:
@@ -295,6 +297,9 @@ def serve_file(filename):
     ])
     
     is_one_time = file_info and file_info.get('one_time_view') == 1
+    
+    if no_embed:
+        return send_from_directory(UPLOAD_FOLDER, filename)
     
     if is_bot:
         mime_type, _ = mimetypes.guess_type(file_path)
